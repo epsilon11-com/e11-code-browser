@@ -1,0 +1,15 @@
+.ecode pre[class*="language-"] {
+    margin: 1em 0 0 0;
+}
+
+.ecode .ecode_footer {
+    color: #555;
+
+    padding: 6px 6px 6px 12px;
+
+    font-size: .75em;
+}
+
+.ecode .ecode_file {
+    font-weight: bold;
+}
