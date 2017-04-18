@@ -105,6 +105,22 @@ class e11CodeBrowserAdmin {
   // The file reference should allow spaces if between unescaped single quotes.
   // Does proc_open() deal with spaces in parameters?
 
+
+  private static function _exec($cmd, &$output, &$stderr) {
+    $process = proc_open($cmd, array(
+      1 => array('pipe', 'w'),
+      2 => array('pipe', 'w'),
+    ), $pipes);
+
+    $output = explode("\n", stream_get_contents($pipes[1]));
+    fclose($pipes[1]);
+
+    $stderr = stream_get_contents($pipes[2]);
+    fclose($pipes[2]);
+
+    return proc_close($process);
+  }
+
   /**
    * Scan a post for [ecode] shortcodes with attributes referencing a Git
    * repository.  Retrieve the sections of code from the repository into a
@@ -117,6 +133,16 @@ class e11CodeBrowserAdmin {
    */
   public static function cache_git_references($data, $postarr) {
     global $wpdb;
+
+    // Track each GitHub download so that multiple references to the same
+    // repo won't trigger multiple downloads.
+
+    $githubDownloaded = array();
+
+    // Remove cache table entries for post ID.
+
+    $wpdb->delete(self::$cacheTableName,
+                          array('post_id' => $postarr['ID']), array('%d'));
 
     // Read 'ecode' shortcode tags from $data['post_content'] that contain
     // a 'local' or 'github' parameter.
@@ -133,7 +159,15 @@ class e11CodeBrowserAdmin {
         preg_match('/file\s*=\s*[\'"]([^\'"]*)[\'"]/', $tag, $file);
         preg_match('/lines\s*=\s*[\'"]([^\'"]*)[\'"]/', $tag, $lines);
 
-        if (!empty($local)) {
+        // If 'local' or 'github' attributes are supplied, they cannot be
+        // empty.
+
+        if (!empty($local) && !empty($github)) {
+          // 'local' or 'github' sttributes cannot be supplied at the same time.
+
+          $error[] = __('"local" and "github" attributes cannot be specified
+                                                together', 'e11-code-browser');
+        } elseif (!empty($local)) {
           $local = trim(rawurldecode($local[1]));
           
           if (empty($local)) {
@@ -148,7 +182,9 @@ class e11CodeBrowserAdmin {
                                                   'e11-code-browser');
           }
         }
-        
+
+        // 'ref' and 'file' attributes cannot be empty.
+
         if (!empty($ref)) {
           $ref = trim($ref[1]);
           
@@ -171,6 +207,10 @@ class e11CodeBrowserAdmin {
           $error[] = __('"file" attribute is required', 'e11-code-browser');
         }
 
+        // Validate 'lines' attribute if provided.  It will be converted into
+        // a two element array with a starting and ending line number if these
+        // are present, or an empty array if not.
+
         if (!empty($lines)) {
           $lines = trim($lines[1]);
 
@@ -182,13 +222,107 @@ class e11CodeBrowserAdmin {
             }
           }
         } else {
-          $lines = '';
+          $lines = array();
         }
 
         if (empty($error)) {
           // Process line if no errors found.
 
-          if (!empty($local)) {
+          if (!empty($github)) {
+            // [TODO] Allow the content directory for downloaded repositories
+            //        to be set by the user.  Currently using
+            //        WP_CONTENT_DIR . '/cache/e11-code-browser/'.
+
+            $contentDir = parse_url(content_url(), PHP_URL_PATH);
+
+            // Get path to WordPress directory, ensuring that if a trailing
+            // slash is present it's removed.
+
+            $homePath = get_home_path();
+
+            if (substr($homePath, -1, 1) == '/') {
+              $homePath = substr($homePath, 0, -1);
+            }
+
+            // Build path to the directory to store downloaded GitHub repos,
+            // then make the directory (and any parent directories in the
+            // path that don't exist.)
+
+            $gitDir = $homePath . $contentDir . '/cache/e11-code-browser/';
+
+            if (!file_exists($gitDir)) {
+              if (!mkdir($gitDir, 0755, true)) {
+                $error[] = __('Unable to make GitHub cache directory',
+                                                          'e11-code-browser');
+              }
+            }
+
+            // Break here if the directory to download repos to cannot be
+            // created.
+
+            if (!empty($error)) {
+              break;
+            }
+
+            // Build path to directory to download the specified repository to.
+
+            $repoDir = $gitDir . $github;
+
+            if (file_exists($repoDir)) {
+              if (!isset($githubDownloaded[$repoDir])) {
+
+                // Update repo.
+
+                $curDir = getcwd();
+
+                chdir($repoDir);
+
+                $rv = self::_exec('git fetch --all', $output, $stderr);
+
+                if ($rv !== 0) {
+                  $error[] = __("\"git\" returned an error during fetch:\n",
+                      'e11-code-browser') . $stderr;
+                }
+
+                $rv = self::_exec('git reset --hard origin/master',
+                                                        $output, $stderr);
+
+                if ($rv !== 0) {
+                  $error[] = __("\"git\" returned an error during reset:\n",
+                      'e11-code-browser') . $stderr;
+                }
+
+                chdir($curDir);
+
+                $githubDownloaded[$repoDir] = true;
+              }
+            } else {
+              // Fetch repo.
+
+              $cmd = 'git clone '
+                . escapeshellarg('https://github.com/' . $github) . ' '
+                . escapeshellarg($repoDir);
+
+              $rv = self::_exec($cmd, $output, $stderr);
+
+              if ($rv !== 0) {
+                $error[] = __("\"git\" returned an error:\n",
+                                          'e11-code-browser') . $stderr;
+              }
+
+              // Note: not technically true if the download failed above, but
+              // still want to prevent multiple download attempts to the same
+              // repo in that scenario.
+
+              $githubDownloaded[$repoDir] = true;
+            }
+
+            // Set $local to the directory of the downloaded repository.
+
+            $local = $repoDir;
+          }
+
+          if (empty($error) && !empty($local)) {
             // Handle local repository
 
             // Run "git show" for the specified repo/ref/file, capturing
@@ -198,28 +332,18 @@ class e11CodeBrowserAdmin {
               . escapeshellarg($local) . '/.git show '
               . escapeshellarg($ref) . ':' . escapeshellarg($file);
 
-            $process = proc_open($cmd, array(
-              1 => array('pipe', 'w'),
-              2 => array('pipe', 'w'),
-            ), $pipes);
-
-            $output = explode("\n", stream_get_contents($pipes[1]));
-            fclose($pipes[1]);
-
-            $stderr = stream_get_contents($pipes[2]);
-            fclose($pipes[2]);
-
-            $rv = proc_close($process);
+            $rv = self::_exec($cmd, $output, $stderr);
 
             // If return value doesn't indicate success, add result to errors.
             // Otherwise, process output.
 
             if ($rv != 0) {
-              $error[] = "\"git\" returned an error:\n" . $stderr;
+              $error[] = __("\"git\" returned an error:\n",
+                                            'e11-code-browser') . $stderr;
             } else {
               if (!empty($lines)) {
                 $output = join("\n",
-                  array_splice($output, $lines[0],
+                  array_splice($output, $lines[0] - 1,
                     $lines[1] - $lines[0] + 1));
               } else {
                 $output = join("\n", $output);
@@ -233,9 +357,15 @@ class e11CodeBrowserAdmin {
                 $lines = $lines[0] . '-' . $lines[1];
               }
 
-              $hash = hash('sha256', $local . $ref . $file . $lines);
+              if (!empty($github)) {
+                $hashRepo = $github;
+              } else {
+                $hashRepo = $local;
+              }
 
-              $wpdb->replace(
+              $hash = hash('sha256', $hashRepo . $ref . $file . $lines);
+
+              $wpdb->insert(
                 self::$cacheTableName,
                 array(
                   'post_id' => $postarr['ID'],
@@ -249,8 +379,6 @@ class e11CodeBrowserAdmin {
                 )
               );
             }
-          } elseif (isset($github)) {
-            // [TODO] Handle GitHub
           }
         }
 

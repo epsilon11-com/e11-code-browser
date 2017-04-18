@@ -75,7 +75,7 @@ class e11CodeBrowser {
       // Look up code in cache table.
 
       $hash = hash('sha256', $attr['local'] . $attr['ref']
-                                          . $attr['file'] . $attr['lines']);
+        . $attr['file'] . $attr['lines']);
 
       $content = $wpdb->get_var($wpdb->prepare('
         SELECT content FROM ' . self::$cacheTableName . '
@@ -83,30 +83,89 @@ class e11CodeBrowser {
         ', array($hash)
       ));
 
-      if (isset($content)) {
-        // [TODO] Allow customization of footer format
-        // [TODO] Allow footer to be displayed as header
+      $content = esc_html($content);
+    } elseif (isset($attr['github'])) {
+      // Require 'ref', 'file', and 'lines' to be specified.
 
-        return '<div id="ecode_' .
-          sprintf('%04d', self::$sequenceNum++)
-          . '" class="ecode"><pre><code class="language-php">'
-          . $content
-          . '</code></pre>'
-          . '<div class="ecode_footer">'
-          . '<span class="ecode_file">' . $attr['file'] . '</span>'
-          . '<span class="ecode_lines"> lines ' . $attr['lines'] . '</span>'
-          . '</div>'
-          . '</div>';
+      if (!isset($attr['ref']) || !isset($attr['file']) || !isset($attr['lines'])) {
+        return '';
       }
 
-      return '';
-    } elseif (isset($attr['github'])) {
+      // Look up code in cache table.
 
-    } else {
-      return '<pre><code id="ecode_' .
-        sprintf('%04d', self::$sequenceNum++)
-        . '" class="language-php">' . $content . '</code></pre>';
+      $hash = hash('sha256', $attr['github'] . $attr['ref']
+        . $attr['file'] . $attr['lines']);
+
+      $content = $wpdb->get_var($wpdb->prepare('
+        SELECT content FROM ' . self::$cacheTableName . '
+        WHERE hash = %s
+        ', array($hash)
+      ));
+
+      $content = esc_html($content);
     }
+
+    if (isset($content)) {
+      // [TODO] Allow customization of footer format
+      // [TODO] Allow footer to be displayed as header
+
+      $footer = '';
+
+      $firstLine = 1;
+      $lastLine = -1;
+
+      if (isset($attr['lines'])) {
+        if (preg_match('/^(\d+)-(\d+)/', $attr['lines'], $result)) {
+          $firstLine = $result[1];
+          $lastLine = $result[2];
+        }
+      }
+
+      if (isset($attr['file'])) {
+        $footer .= '<span class="ecode_file">' . $attr['file'] . '</span>';
+
+        if (isset($attr['lines'])) {
+          $footer .= '<span class="ecode_lines">'
+                                    . __('lines', 'e11-code-browser') . ' '
+                                    . $attr['lines'] . '</span>';
+        } else {
+          $footer .= '<span class="ecode_lines">'
+                        . __('entire file', 'e11-code-browser') . '</span>';
+        }
+      }
+
+      if (isset($attr['github'])) {
+        if ($firstLine > 1) {
+          $lineAnchor = '#L' . $firstLine . '-L' . $lastLine;
+        } else {
+          $lineAnchor = '';
+        }
+
+        $footer .= '<span class="ecode_github"><a href="https://github.com/'
+          . $attr['github']
+          . '/blob/' . $attr['ref'] . '/' . $attr['file']
+          . $lineAnchor . '">GitHub</a></span>';
+      }
+
+      if (!empty($footer)) {
+        $footer = '<div class="ecode_footer">' . $footer . '</div>';
+      }
+
+      return '<div id="ecode_' .
+        sprintf('%04d', self::$sequenceNum++)
+        . '" class="ecode"><pre class="line-numbers" data-start="'
+        . $firstLine . '"><code class="language-php">'
+        . $content
+        . '</code></pre>'
+        . $footer
+        . '</div>';
+    }
+
+//    } else {
+//      return '<pre><code id="ecode_' .
+//        sprintf('%04d', self::$sequenceNum++)
+//        . '" class="language-php">' . $content . '</code></pre>';
+//    }
 
     return '';
   }
